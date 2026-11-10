@@ -12,13 +12,21 @@ The list is per project, survives `/clear` and restarts, and worktrees of one re
 
 ## Install
 
-Run Claude Code with the mod loaded from this checkout:
+In Claude Code (2.1.275 or later):
+
+```
+/plugin install loose-ends --marketplace rkosta/loose-ends
+```
+
+Pull updates with `claude plugin marketplace update loose-ends`.
+
+To work on the mod, load it from a checkout instead; interactive sessions hot-reload it when its files change:
 
 ```sh
 claude --plugin-dir ~/Code/personal/loose-ends
 ```
 
-Interactive sessions hot-reload the mod when its files change.
+Disable the installed copy while you do, so the mod isn't loaded twice.
 
 ## Using it
 

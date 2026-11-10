@@ -1,0 +1,15 @@
+{
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+  "name": "loose-ends",
+  "description": "The loose-ends mod for Claude Code.",
+  "owner": {
+    "name": "Ricardo Costa"
+  },
+  "plugins": [
+    {
+      "name": "loose-ends",
+      "description": "Keeps a per-project list of open discussion threads that Claude parks and closes, shown in a side pane and the status line.",
+      "source": "./"
+    }
+  ]
+}
