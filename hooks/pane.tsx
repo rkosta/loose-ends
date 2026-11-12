@@ -7,7 +7,7 @@ import type {
   RenderInput,
 } from 'claude-code'
 
-import { dropCommand, tieCommand } from './commands'
+import { dropCommand, pullCommand, tieCommand } from './commands'
 import type { CommandAnswer } from './commands'
 import { describeError, logDebug } from './state'
 import {
@@ -51,7 +51,7 @@ const pickedId = atom({ plugin: 'loose-ends', key: 'picked' } as const, 0)
 const armedDrop = atom({ plugin: 'loose-ends', key: 'dropArmed' } as const, 0)
 
 // Set when the person closes the pane by hand, so this session stops opening
-// it on its own; `/threads` clears it.
+// it on its own; `/loose` clears it.
 const isDismissed = atom({ plugin: 'loose-ends', key: 'paneDismissed' } as const, false)
 
 const TONE_COLOR: Readonly<Record<AgeTone, Color>> = {
@@ -86,8 +86,8 @@ const INLINE_ROWS = 3
 /** Settled threads a docked pane lists. */
 const SETTLED_SHOWS = 5
 
-/** What a press does to the picked thread: what `/tie` or `/drop` does. */
-type Act = 'tie' | 'drop'
+/** What a press does to the picked thread: what `/loose tie`, `drop` or `pull` does. */
+type Act = 'tie' | 'drop' | 'pull'
 
 /** The threads to draw, or none when the read fails (logged). */
 async function readShown($: EngineInterface): Promise<readonly Thread[]> {
@@ -153,12 +153,24 @@ async function pressDrop($: EngineInterface, id: number, isArmed: boolean): Prom
   }
 }
 
-/** Runs tie or drop on thread `id` and toasts what it answered. Never throws. */
+/** Runs the command a press stands for on thread `id`. Never throws. */
+async function runAct($: EngineInterface, kind: Act, id: number): Promise<CommandAnswer> {
+  // `$` goes only to named functions at the call site, so each is spelled out.
+  switch (kind) {
+    case 'tie':
+      return tieCommand($, String(id))
+    case 'drop':
+      return dropCommand($, String(id))
+    case 'pull':
+      return pullCommand($, String(id))
+  }
+}
+
+/** Runs tie, drop or pull on thread `id` and toasts what it answered. Never throws. */
 async function act($: EngineInterface, kind: Act, id: number): Promise<void> {
   await arm($, 0)
   // The commands never throw: a failure is their one-line answer.
-  const answer: CommandAnswer =
-    kind === 'tie' ? await tieCommand($, String(id)) : await dropCommand($, String(id))
+  const answer = await runAct($, kind, id)
 
   try {
     $.ui.toast(answer.text)
@@ -168,7 +180,7 @@ async function act($: EngineInterface, kind: Act, id: number): Promise<void> {
 }
 
 /**
- * Opens the pane. Asked (`/threads`), it takes the keyboard and is placed at
+ * Opens the pane. Asked (`/loose`), it takes the keyboard and is placed at
  * any width, and the person's earlier close is forgotten. Unasked, it opens
  * only while something is open and the person has not closed it by hand this
  * session; the engine docks it from 144 columns and holds it back below.
@@ -204,7 +216,7 @@ export async function openPane($: EngineInterface, isAsked: boolean): Promise<bo
 /**
  * The pane's own close button: some hosts (Orca) take the engine's close mark
  * and ctrl+x for themselves. Counts as the person's close, so this session
- * stops opening it unasked until `/threads`. Never throws.
+ * stops opening it unasked until `/loose`. Never throws.
  */
 async function closePane($: EngineInterface): Promise<void> {
   try {
@@ -241,8 +253,8 @@ const settledParts = (
 }
 
 /**
- * The pane: open threads with an age bar, oldest first, and tie and drop for
- * the picked one; docked, a header and the latest settled threads too.
+ * The pane: open threads with an age bar, oldest first, and tie, pull and
+ * drop for the picked one; docked, a header and the latest settled threads too.
  * Reading the threads atom subscribes it, so every write redraws it.
  */
 export async function drawPane(
@@ -295,13 +307,21 @@ export async function drawPane(
       </Box>
       {open.length === 0 && <Text dimColor>Nothing open.</Text>}
       {openRows}
-      {hidden > 0 && <Text dimColor>{`  +${hidden} more · /threads`}</Text>}
-      <Box gap={2}>
+      {hidden > 0 && <Text dimColor>{`  +${hidden} more · /loose`}</Text>}
+      {/* Buttons to click, no hotkeys: a hotkey presses only while the pane
+          holds the keyboard, and some hosts (Orca) keep a click from giving
+          it, so a letter landed in the prompt instead. */}
+      <Box gap={1}>
+        {target !== undefined && (
+          <Button
+            key="pull"
+            label={`pull #${target.id}`}
+            onPress={() => void act($, 'pull', target.id)}
+          />
+        )}
         {target !== undefined && (
           <Button
             key="tie"
-            plain
-            hotkey="t"
             label={`tie #${target.id}`}
             onPress={() => void act($, 'tie', target.id)}
           />
@@ -309,14 +329,11 @@ export async function drawPane(
         {target !== undefined && (
           <Button
             key="drop"
-            plain
-            hotkey="d"
-            label={isArmed ? `drop #${target.id}? d again` : `drop #${target.id}`}
+            label={isArmed ? `confirm drop #${target.id}` : `drop #${target.id}`}
             onPress={() => void pressDrop($, target.id, isArmed)}
           />
         )}
-        <Button key="hide" plain hotkey="x" label="close" onPress={() => void closePane($)} />
-        {!e.props.isFocused && <Text dimColor>click to use</Text>}
+        <Button key="hide" label="close" onPress={() => void closePane($)} />
       </Box>
     </Box>
   )

@@ -5,6 +5,8 @@ import type { On } from 'claude-code'
 import type { Thread } from '../types'
 import { REFRESH_MS } from './state'
 import {
+  MAX_CONTEXT,
+  MAX_LABEL,
   ageBar,
   ageTone,
   fitColumns,
@@ -84,6 +86,9 @@ const setup = (on: On, options: SetupOptions = {}) => {
     holdNextRead: false,
     // Whether `$.ui.open` answers that the pane is drawn.
     isPanePlaced: false,
+    // Whether the prompt box takes a `$.prompt.fill`; false answers as a
+    // dialog holding the keys would.
+    canFill: true,
   }
   on('tool.register', (_, e) => {
     if (flags.failToolRegister || e.name === failToolNamed) {
@@ -218,6 +223,14 @@ const setup = (on: On, options: SetupOptions = {}) => {
     return { value: undefined }
   })
 
+  // Every prompt-box fill the plugin asked for.
+  const fills: unknown[] = []
+  on('prompt.fill', (_, e) => {
+    fills.push(e)
+
+    return flags.canFill ? { isFilled: true } : { isFilled: false, refusal: 'dialog' as const }
+  })
+
   const clock = mock.clock(on, { now })
 
   return {
@@ -233,6 +246,7 @@ const setup = (on: On, options: SetupOptions = {}) => {
     statuses,
     toasts,
     closes,
+    fills,
   }
 }
 
@@ -321,7 +335,7 @@ const last = (seen: readonly unknown[]): unknown => {
     return undefined
   }
 
-  expect(written).toMatchObject({ shape: 'threads-1' })
+  expect(written).toMatchObject({ shape: 'threads-2' })
 
   return (written as { value: unknown }).value
 }
@@ -471,12 +485,12 @@ test('parseProject reads a v1 value and an unversioned one alike', async () => {
   expect(unversioned).toEqual(versioned)
 })
 
-test('parseProject flags any version other than 1 as unrecognised', async () => {
+test('parseProject flags any version other than 1 or 2 as unrecognised', async () => {
   // Arrange
   const value = { nextId: 2, threads: [open(1, 'a')] }
 
   // Act / Assert
-  expect(parseProject({ ...value, v: 2 })).toEqual({ kind: 'unrecognised' })
+  expect(parseProject({ ...value, v: 3 })).toEqual({ kind: 'unrecognised' })
   expect(parseProject({ ...value, v: 0 })).toEqual({ kind: 'unrecognised' })
   expect(parseProject({ ...value, v: '1' })).toEqual({ kind: 'unrecognised' })
 })
@@ -740,7 +754,7 @@ test('the start sweep spares an unrecognised key and still deletes a stale one',
 
 test('the start sweep spares a value a later version stored', async ($, on) => {
   // Arrange: empty and long idle, so v1 would sweep it.
-  const future = { v: 2, nextId: 1, threads: [], labels: ['kept'] }
+  const future = { v: 3, nextId: 1, threads: [], labels: ['kept'] }
   const { store } = setup(on, { store: { '/future': future } })
 
   // Act
@@ -752,7 +766,7 @@ test('the start sweep spares a value a later version stored', async ($, on) => {
 
 test('an unrecognised value loads as an empty list and the store keeps it', async ($, on) => {
   // Arrange
-  const future = { v: 2, nextId: 3, threads: [open(1, 'a'), open(2, 'b')] }
+  const future = { v: 3, nextId: 3, threads: [open(1, 'a'), open(2, 'b')] }
   const { store, seen } = setup(on, { store: { '/p': future } })
 
   // Act
@@ -769,7 +783,7 @@ test('a store value turning unrecognised after start empties the atom and stays'
     store: { '/p': { v: 1, nextId: 2, threads: [open(1, 'a')] } },
   })
   await start($)
-  const future = { v: 2, nextId: 2, threads: [open(1, 'a')] }
+  const future = { v: 3, nextId: 2, threads: [open(1, 'a')] }
   store.set('/p', future)
 
   // Act
@@ -782,7 +796,7 @@ test('a store value turning unrecognised after start empties the atom and stays'
 
 test('every write on an unrecognised value is refused and leaves the store byte-identical', async ($, on) => {
   // Arrange
-  const future = { v: 2, nextId: 3, threads: [open(1, 'a'), open(2, 'b')] }
+  const future = { v: 3, nextId: 3, threads: [open(1, 'a'), open(2, 'b')] }
   const before = JSON.stringify(future)
   const { store } = setup(on, { store: { '/p': future } })
   await start($)
@@ -816,7 +830,7 @@ test('list and /threads on an unrecognised value say it is unreadable', async ($
 
   // Act
   const listed = await $.tool.call({ tool: LIST })
-  const threads = await run($, 'threads')
+  const threads = await run($, '')
 
   // Assert
   expect(listed).toEqual({ deny: UNREADABLE_READ })
@@ -840,7 +854,7 @@ test('a park on a value with an unparseable timestamp is refused', async ($, on)
   expect(JSON.stringify(store.get('/p'))).toBe(before)
 })
 
-test('an unversioned value is read and rewritten as v1 on the next write', async ($, on) => {
+test('an unversioned value is read and rewritten as v2 on the next write', async ($, on) => {
   // Arrange
   const { store, seen } = setup(on, {
     store: { '/p': { nextId: 2, threads: [open(1, 'a')] } },
@@ -853,7 +867,7 @@ test('an unversioned value is read and rewritten as v1 on the next write', async
   // Assert
   expect(answer).toMatchObject({ text: 'Parked #2: b' })
   expect(store.get('/p')).toEqual({
-    v: 1,
+    v: 2,
     nextId: 3,
     threads: [open(1, 'a'), { id: 2, text: 'b', origin: 'user', openedAt: iso(NOW) }],
   })
@@ -874,9 +888,9 @@ test('parseProject ignores an unknown top-level field on a v1 value', async () =
   })
 })
 
-test('parseProject reads a string or non-1 numeric v as unrecognised', async () => {
+test('parseProject reads a string or an unknown numeric v as unrecognised', async () => {
   // Arrange
-  const versions: unknown[] = ['1', 0, 2, null, true]
+  const versions: unknown[] = ['1', '2', 0, 3, null, true]
 
   // Act
   const parsed = versions.map(v => parseProject({ v, nextId: 1, threads: [] }))
@@ -932,7 +946,7 @@ test('a stored value with duplicate ids is unreadable: a park is refused and the
 test('after the user fixes an unrecognised store the next tick shows the list again', async ($, on) => {
   // Arrange
   const { store, clock, seen } = setup(on, {
-    store: { '/p': { v: 2, nextId: 2, threads: [open(1, 'a')] } },
+    store: { '/p': { v: 3, nextId: 2, threads: [open(1, 'a')] } },
   })
   await start($)
   expect(seen).toEqual([])
@@ -946,7 +960,7 @@ test('after the user fixes an unrecognised store the next tick shows the list ag
   expect(await run($, 'park', 'b')).toMatchObject({ text: 'Parked #2: b' })
 })
 
-test('a park on an unversioned value with a stale counter writes v1 and keeps the counter monotonic', async ($, on) => {
+test('a park on an unversioned value with a stale counter writes v2 and keeps the counter monotonic', async ($, on) => {
   // Arrange
   const { store } = setup(on, {
     store: { '/p': { nextId: 1, threads: [open(4, 'a')] } },
@@ -959,7 +973,7 @@ test('a park on an unversioned value with a stale counter writes v1 and keeps th
   await run($, 'park', 'c')
 
   // Assert
-  expect(stored(store)).toMatchObject({ v: 1, nextId: 7 })
+  expect(stored(store)).toMatchObject({ v: 2, nextId: 7 })
   expect(stored(store).threads.map(t => t.id)).toEqual([4, 6])
 })
 
@@ -1010,7 +1024,7 @@ test('in a worktree every write lands under the main checkout key', async ($, on
   expect([...store.keys()]).toEqual(['/main'])
   expect(store.has('/main/.wt/x')).toBe(false)
   expect(store.get('/main')).toEqual({
-    v: 1,
+    v: 2,
     nextId: 3,
     threads: [
       {
@@ -1073,7 +1087,17 @@ test('session.start registers park, close and list, none deferred', async ($, on
   expect(tools[0]).toMatchObject({
     inputSchema: {
       type: 'object',
-      properties: { items: { type: 'array', items: { type: 'string' }, minItems: 1 } },
+      properties: {
+        items: {
+          type: 'array',
+          items: {
+            type: 'object',
+            properties: { label: { type: 'string' }, context: { type: 'string' } },
+            required: ['label'],
+          },
+          minItems: 1,
+        },
+      },
       required: ['items'],
     },
   })
@@ -1193,8 +1217,8 @@ test('park with no items or a blank label is denied and writes nothing', async (
   expect(answers).toEqual([
     { deny: 'park needs at least one item' },
     { deny: 'park needs at least one item' },
-    { deny: 'park items must be non-blank strings' },
-    { deny: 'park items must be non-blank strings' },
+    { deny: 'park items need a non-blank label and a string context' },
+    { deny: 'park items need a non-blank label and a string context' },
     { deny: 'park needs at least one item' },
   ])
   expect(store.size).toBe(0)
@@ -1215,7 +1239,7 @@ test('park past 15 open threads is denied and writes nothing', async ($, on) => 
 
   // Assert
   expect(over).toEqual({
-    deny: '15 loose ends open — ask the user to /tie or /drop some first',
+    deny: '15 loose ends open — ask the user to /loose tie or /loose drop some first',
   })
   expect(before).toEqual(value)
   expect(upTo).toEqual({ result: 'Parked: #15' })
@@ -1475,7 +1499,7 @@ test('park of a new label plus a dupe at 14 open is denied, dupe alone is not', 
 
   // Assert
   expect(mixed).toEqual({
-    deny: '15 loose ends open — ask the user to /tie or /drop some first',
+    deny: '15 loose ends open — ask the user to /loose tie or /loose drop some first',
   })
   expect(unchanged).toEqual(value)
   expect(mixedFits).toEqual({ result: 'Parked: #1 (already open), #15' })
@@ -1483,16 +1507,17 @@ test('park of a new label plus a dupe at 14 open is denied, dupe alone is not', 
 
 // --- T5: slash commands /park /threads /tie /drop ---
 
-// Runs `/command args` as the person typing it in the terminal would.
-const run = ($: Engine, command: string, args = '') =>
+// Runs `/loose verb args` as the person typing it in the terminal would; an
+// empty verb is bare `/loose`.
+const run = ($: Engine, verb: string, args = '') =>
   $.command.run({
-    command,
-    args,
+    command: 'loose',
+    args: verb === '' ? args : `${verb} ${args}`,
     origin: { kind: 'composer' },
     presentation: { isFullscreen: false, columns: 80 },
   })
 
-test('session.start registers /park /threads /tie /drop with hints', async ($, on) => {
+test('session.start registers /loose alone, its verbs in the hint', async ($, on) => {
   // Arrange
   const { commands } = setup(on)
 
@@ -1501,10 +1526,10 @@ test('session.start registers /park /threads /tie /drop with hints', async ($, o
 
   // Assert
   expect(commands).toEqual([
-    expect.objectContaining({ name: 'park', argumentHint: '<text>' }),
-    expect.objectContaining({ name: 'threads' }),
-    expect.objectContaining({ name: 'tie', argumentHint: '<id> [note]' }),
-    expect.objectContaining({ name: 'drop', argumentHint: '<id>' }),
+    expect.objectContaining({
+      name: 'loose',
+      argumentHint: '[park <text> | pull <id> | tie <id> [note] | drop <id> | list]',
+    }),
   ])
 })
 
@@ -1553,8 +1578,8 @@ test('/park with no text answers usage and writes nothing', async ($, on) => {
   const blank = await run($, 'park', '   ')
 
   // Assert
-  expect(empty).toMatchObject({ text: 'Usage: /park <text>' })
-  expect(blank).toMatchObject({ text: 'Usage: /park <text>' })
+  expect(empty).toMatchObject({ text: 'Usage: /loose park <text>' })
+  expect(blank).toMatchObject({ text: 'Usage: /loose park <text>' })
   expect(store.size).toBe(0)
 })
 
@@ -1615,14 +1640,14 @@ test('/tie and /drop with a missing or non-numeric id answer usage', async ($, o
 
   // Assert
   expect(answers.map(a => a.text)).toEqual([
-    'Usage: /tie <id> [note]',
-    'Usage: /tie <id> [note]',
-    'Usage: /tie <id> [note]',
-    'Usage: /tie <id> [note]',
-    'Usage: /tie <id> [note]',
-    'Usage: /drop <id>',
-    'Usage: /drop <id>',
-    'Usage: /drop <id>',
+    'Usage: /loose tie <id> [note]',
+    'Usage: /loose tie <id> [note]',
+    'Usage: /loose tie <id> [note]',
+    'Usage: /loose tie <id> [note]',
+    'Usage: /loose tie <id> [note]',
+    'Usage: /loose drop <id>',
+    'Usage: /loose drop <id>',
+    'Usage: /loose drop <id>',
   ])
   expect(stored(store)).toEqual(value)
 })
@@ -1693,7 +1718,7 @@ test('/threads lists open then the last 5 closed, with floor-day ages', async ($
   await start($)
 
   // Act
-  const answer = await run($, 'threads')
+  const answer = await run($, '')
 
   // Assert
   expect(answer).toMatchObject({
@@ -1717,11 +1742,11 @@ test('/threads ages follow the mocked clock', async ($, on) => {
     store: { '/p': { nextId: 2, threads: [open(1, 'a', NOW)] } },
   })
   await start($)
-  const before = await run($, 'threads')
+  const before = await run($, '')
 
   // Act
   await clock.advance(3 * DAY)
-  const after = await run($, 'threads')
+  const after = await run($, '')
 
   // Assert
   expect(before).toMatchObject({ text: '— open —\n#1 · 0d · a' })
@@ -1734,7 +1759,7 @@ test('/threads with only closed threads shows the closed section', async ($, on)
   await start($)
 
   // Act
-  const answer = await run($, 'threads')
+  const answer = await run($, '')
 
   // Assert
   expect(answer).toMatchObject({ text: '— closed —\n#1 · tied 1d · x' })
@@ -1746,7 +1771,7 @@ test('/threads with no threads says No loose ends.', async ($, on) => {
   await start($)
 
   // Act
-  const answer = await run($, 'threads')
+  const answer = await run($, '')
 
   // Assert
   expect(answer).toMatchObject({ text: 'No loose ends.' })
@@ -1761,7 +1786,7 @@ test('a command whose store write fails answers one line', async ($, on) => {
   const answer = await run($, 'park', 'x')
 
   // Assert
-  expect(answer).toMatchObject({ text: 'loose-ends: /park failed' })
+  expect(answer).toMatchObject({ text: 'loose-ends: /loose park failed' })
 })
 
 test('/park of a label matching a closed thread creates a new thread', async ($, on) => {
@@ -1788,7 +1813,7 @@ test('/park of an over-long label stores and shows the truncated label', async (
 
   // Act
   const answer = await run($, 'park', long)
-  const listed = await run($, 'threads')
+  const listed = await run($, '')
 
   // Assert
   expect(answer).toMatchObject({ text: `Parked #1: ${'x'.repeat(60)}` })
@@ -1820,7 +1845,7 @@ test('/tie keeps an arrow inside the note as typed', async ($, on) => {
 
   // Act
   const answer = await run($, 'tie', '1 a → b')
-  const listed = await run($, 'threads')
+  const listed = await run($, '')
 
   // Assert
   expect(answer).toMatchObject({ text: 'Tied #1 a → a → b' })
@@ -1838,7 +1863,7 @@ test('/drop with extra text after the id answers usage and drops nothing', async
   const answer = await run($, 'drop', '1 please')
 
   // Assert
-  expect(answer).toMatchObject({ text: 'Usage: /drop <id>' })
+  expect(answer).toMatchObject({ text: 'Usage: /loose drop <id>' })
   expect(stored(store)).toEqual(value)
 })
 
@@ -1854,7 +1879,7 @@ test('/threads ages floor: 0d for the same day and at 23h59, 1d at 24h', async (
   await start($)
 
   // Act
-  const answer = await run($, 'threads')
+  const answer = await run($, '')
 
   // Assert
   expect(answer).toMatchObject({
@@ -1884,7 +1909,7 @@ test('/threads with more than 5 closed shows only the 5 most recently closed', a
   await start($)
 
   // Act
-  const answer = await run($, 'threads')
+  const answer = await run($, '')
 
   // Assert
   expect(answer).toMatchObject({
@@ -1902,7 +1927,7 @@ test('/threads with more than 5 closed shows only the 5 most recently closed', a
 // The rule as the plan gives it, written out here so a change to the module
 // constant shows up as a failing test.
 const RULE_TEXT =
-  '**Loose ends.** This project keeps a list of open discussion threads (tools `park`, `close`, `list`). If your previous reply raised 2+ separate points that needed the user\'s input (in prose or as questions in a question dialog) and their reply took up only some or none of them, call `park` with the rest, then say "Parked: …" in one line. A label is a short noun phrase of about 50 characters naming the decision, not the question with its options ("repo hosting", "HANDOFF.md: README or docs/"), clear without this conversation, with no prefix shared across labels. When a parked thread is settled, call `close` with a one-line note; if threads remain open, add one line, "Still open: #id label, …". When the user\'s reply changes what a thread asks, close it with a note saying so and park the new question. Never park implementation steps, todo items or trivia. After `/clear` or at session start, call `list` only when you need to know what\'s pending.'
+  '**Loose ends.** This project keeps a list of open discussion threads (tools `park`, `close`, `list`). If your previous reply raised 2+ separate points that needed the user\'s input (in prose or as questions in a question dialog) and their reply took up only some or none of them, call `park` with the rest, then say "Parked: …" in one line. A label is a short noun phrase of about 50 characters naming the decision, not the question with its options ("repo hosting", "HANDOFF.md: README or docs/"), clear without this conversation, with no prefix shared across labels. Give each a context of 1–3 sentences (where the point came up, the options on the table, what hinges on it) so the user can pick it up later with `/loose pull`. When a parked thread is settled, call `close` with a one-line note; if threads remain open, add one line, "Still open: #id label, …". When the user\'s reply changes what a thread asks, close it with a note saying so and park the new question. Never park implementation steps, todo items or trivia. After `/clear` or at session start, call `list` only when you need to know what\'s pending.'
 
 const COMPOSE = {
   model: 'claude-test',
@@ -1968,7 +1993,7 @@ test('without its tools registered the rule is left out and the failure is logge
     to: 'debug',
   })
   // The commands and the band do not depend on the tools.
-  expect(commands).toHaveLength(4)
+  expect(commands).toHaveLength(1)
 })
 
 test('before session.start has registered the tools the rule is left out', async ($, on) => {
@@ -2014,12 +2039,7 @@ test('a throwing debug log breaks neither session.start nor a refresh tick', asy
   await start($)
 
   // Assert: the rest of start ran — commands, sweep and the first refresh.
-  expect(commands.map(c => (c as { name: string }).name)).toEqual([
-    'park',
-    'threads',
-    'tie',
-    'drop',
-  ])
+  expect(commands.map(c => (c as { name: string }).name)).toEqual(['loose'])
   expect(store.has('/old')).toBe(false)
   expect(last(seen)).toEqual(here)
 
@@ -2313,7 +2333,7 @@ test('inline, the pane shows three open rows and how many more', async ($, on) =
 
   // Assert
   expect(await rowIds(ui)).toEqual([1, 2, 3])
-  expect(await hasText(ui, '  +2 more · /threads')).toBe(true)
+  expect(await hasText(ui, '  +2 more · /loose')).toBe(true)
   expect(await hasText(ui, 'LOOSE ENDS')).toBe(false)
   await ui.unmount()
 })
@@ -2357,7 +2377,7 @@ test('pressing a row picks it, and drop arms then drops that one', async ($, on)
 
   // Assert: the first press only arms; the second drops.
   expect(pickedLabel).toBe('drop #2')
-  expect(armedLabel).toBe('drop #2? d again')
+  expect(armedLabel).toBe('confirm drop #2')
   expect(toastsWhileArmed).toEqual([])
   expect(rowsWhileArmed).toEqual([1, 2])
   expect(toasts).toEqual(['Dropped #2 b'])
@@ -2406,7 +2426,7 @@ test('tie disarms drop, so the next target needs two presses', async ($, on) => 
 
   // Assert: the drop press armed #2 rather than dropping it.
   expect(toasts).toEqual(['Tied #1 a'])
-  expect((await ui.find({ type: 'Button', key: 'drop' }))?.text).toBe('drop #2? d again')
+  expect((await ui.find({ type: 'Button', key: 'drop' }))?.text).toBe('confirm drop #2')
   expect(await rowIds(ui)).toEqual([2, 3])
   await ui.unmount()
 })
@@ -2433,7 +2453,7 @@ test('the pane draws at a tiny bodyColumns without throwing', async ($, on) => {
 test('an atom stored under the current shape draws its rows', async ($, on) => {
   // Arrange: the same read as the earlier-shape test, under this version's tag.
   on('state.get', () => ({
-    value: { value: { shape: 'threads-1', value: [open(1, 'a')] }, version: 1 },
+    value: { value: { shape: 'threads-2', value: [open(1, 'a')] }, version: 1 },
   }))
   mock.clock(on, { now: NOW })
 
@@ -2489,7 +2509,7 @@ test('the close button closes the pane and stops unasked opens until /threads', 
   const opensBefore = opens.length
   await $.tool.call({ tool: PARK, items: ['b'] })
   const opensAfterPark = opens.length
-  await run($, 'threads')
+  await run($, '')
   await $.tool.call({ tool: PARK, items: ['c'] })
 
   // Assert: the park after the close opened nothing; /threads did, and so
@@ -2513,7 +2533,7 @@ test('/threads opens the pane with the keyboard and answers in one line once it 
   flags.isPanePlaced = true
 
   // Act
-  const answer = await run($, 'threads')
+  const answer = await run($, '')
 
   // Assert
   expect(answer).toMatchObject({ text: 'Opened the loose ends pane.' })
@@ -2548,10 +2568,10 @@ test('a park or /park the store refuses says why in the debug log', async ($, on
 
   // Assert
   expect(tool).toEqual({ deny: 'loose-ends: park failed' })
-  expect(command).toMatchObject({ text: 'loose-ends: /park failed' })
+  expect(command).toMatchObject({ text: 'loose-ends: /loose park failed' })
   expect(debugLines(logs)).toEqual([
     `loose-ends: park failed: ${STORE_FULL}`,
-    `loose-ends: /park failed: ${STORE_FULL}`,
+    `loose-ends: /loose park failed: ${STORE_FULL}`,
   ])
 })
 
@@ -2580,14 +2600,14 @@ test('list and /threads on a store that cannot be read answer one line and say w
 
   // Act
   const listed = await $.tool.call({ tool: LIST })
-  const threads = await run($, 'threads')
+  const threads = await run($, '')
 
   // Assert
   expect(listed).toEqual({ deny: 'loose-ends: list failed' })
-  expect(threads).toMatchObject({ text: 'loose-ends: /threads failed' })
+  expect(threads).toMatchObject({ text: 'loose-ends: /loose list failed' })
   expect(debugLines(logs)).toEqual([
     `loose-ends: list failed: ${STORE_UNREADABLE}`,
-    `loose-ends: /threads failed: ${STORE_UNREADABLE}`,
+    `loose-ends: /loose list failed: ${STORE_UNREADABLE}`,
   ])
 })
 
@@ -2603,14 +2623,14 @@ test('/tie and /drop answer one line when the store cannot be written or read', 
   const onRead = [await run($, 'tie', '1 done'), await run($, 'drop', '1')]
 
   // Assert
-  const tie = expect.objectContaining({ text: 'loose-ends: /tie failed' })
-  const drop = expect.objectContaining({ text: 'loose-ends: /drop failed' })
+  const tie = expect.objectContaining({ text: 'loose-ends: /loose tie failed' })
+  const drop = expect.objectContaining({ text: 'loose-ends: /loose drop failed' })
   expect([...onWrite, ...onRead]).toEqual([tie, drop, tie, drop])
   expect(debugLines(logs)).toEqual([
-    `loose-ends: /tie failed: ${STORE_FULL}`,
-    `loose-ends: /drop failed: ${STORE_FULL}`,
-    `loose-ends: /tie failed: ${STORE_UNREADABLE}`,
-    `loose-ends: /drop failed: ${STORE_UNREADABLE}`,
+    `loose-ends: /loose tie failed: ${STORE_FULL}`,
+    `loose-ends: /loose drop failed: ${STORE_FULL}`,
+    `loose-ends: /loose tie failed: ${STORE_UNREADABLE}`,
+    `loose-ends: /loose drop failed: ${STORE_UNREADABLE}`,
   ])
   expect(stored(store)).toEqual(value)
 })
@@ -2954,7 +2974,7 @@ test('park and close keep labels and notes on one line', async ($, on) => {
   // Act
   await $.tool.call({ tool: PARK, items: ['a\nb'] })
   const closedAnswer = await $.tool.call({ tool: CLOSE, id: 1, note: 'done\n\tsee PR' })
-  const listed = await run($, 'threads')
+  const listed = await run($, '')
 
   // Assert
   expect(stored(store).threads[0]).toMatchObject({ text: 'a b', note: 'done see PR' })
@@ -2978,4 +2998,218 @@ test('a tool that fails to register is named in the debug log and the rule is le
   expect(debugLines(logs)).toEqual([
     expect.stringContaining('loose-ends: tool registration failed: not registered: close ('),
   ])
+})
+
+// --- Context and /loose pull ---
+
+const CONTEXT = 'Came up while fixing the callback form: the ticket says GMT, the market runs on SAST.'
+
+test('parseProject reads a v2 thread with a context and refuses a non-string one', async () => {
+  // Arrange
+  const withContext = { ...open(1, 'a'), context: 'why' }
+
+  // Act
+  const good = parseProject({ v: 2, nextId: 2, threads: [withContext] })
+  const bad = parseProject({ v: 2, nextId: 2, threads: [{ ...open(1, 'a'), context: 7 }] })
+
+  // Assert
+  expect(good).toEqual({ kind: 'ok', project: { nextId: 2, threads: [withContext] } })
+  expect(bad).toEqual({ kind: 'unrecognised' })
+})
+
+test('park stores each label with its context on one line, and still takes a bare label', async ($, on) => {
+  // Arrange
+  const { store, seen } = setup(on)
+  await start($)
+
+  // Act
+  const answer = await $.tool.call({
+    tool: PARK,
+    items: [{ label: 'callback zone', context: `  ${CONTEXT}\n` }, { label: 'blank', context: '  ' }, 'bare'],
+  })
+
+  // Assert
+  expect(answer).toEqual({ result: 'Parked: #1, #2, #3' })
+  expect(stored(store)).toEqual({
+    v: 2,
+    nextId: 4,
+    threads: [
+      { id: 1, text: 'callback zone', context: CONTEXT, origin: 'claude', openedAt: iso(NOW) },
+      { id: 2, text: 'blank', origin: 'claude', openedAt: iso(NOW) },
+      { id: 3, text: 'bare', origin: 'claude', openedAt: iso(NOW) },
+    ],
+  })
+  expect(last(seen)).toEqual(stored(store).threads)
+})
+
+test('park cuts a context at MAX_CONTEXT chars and keeps an open duplicate as it was', async ($, on) => {
+  // Arrange
+  const first = { ...open(1, 'zone'), context: 'first' }
+  const { store } = setup(on, { store: { '/p': { v: 2, nextId: 2, threads: [first] } } })
+  await start($)
+
+  // Act
+  const dupe = await $.tool.call({ tool: PARK, items: [{ label: 'ZONE', context: 'second' }] })
+  const long = await $.tool.call({ tool: PARK, items: [{ label: 'long', context: 'x'.repeat(MAX_CONTEXT + 1) }] })
+
+  // Assert
+  expect(dupe).toEqual({ result: 'Parked: #1 (already open)' })
+  expect(long).toEqual({ result: 'Parked: #2' })
+  expect(stored(store).threads[0]).toEqual(first)
+  expect(stored(store).threads[1]?.context).toBe('x'.repeat(MAX_CONTEXT))
+})
+
+test('park with a blank or missing label or a non-string context is denied and writes nothing', async ($, on) => {
+  // Arrange
+  const { store } = setup(on)
+  await start($)
+  const deny = { deny: 'park items need a non-blank label and a string context' }
+
+  // Act
+  const answers = [
+    await $.tool.call({ tool: PARK, items: [{ context: 'no label' }] }),
+    await $.tool.call({ tool: PARK, items: [{ label: '  ' }] }),
+    await $.tool.call({ tool: PARK, items: [{ label: 'ok', context: 3 }] }),
+    await $.tool.call({ tool: PARK, items: [null] }),
+  ]
+
+  // Assert
+  expect(answers).toEqual([deny, deny, deny, deny])
+  expect(store.size).toBe(0)
+})
+
+test('/loose pull puts the thread and its context in the prompt box at the cursor', async ($, on) => {
+  // Arrange
+  const thread = { ...open(3, 'en-za callback zone: GMT or SAST'), context: CONTEXT }
+  const { fills, store } = setup(on, { store: { '/p': { v: 2, nextId: 4, threads: [thread] } } })
+  await start($)
+  const before = JSON.stringify(store.get('/p'))
+
+  // Act
+  const answer = await run($, 'pull', '#3')
+
+  // Assert
+  expect(answer).toMatchObject({ text: 'Pulled #3 into the prompt.' })
+  expect(fills).toEqual([
+    expect.objectContaining({
+      text: `Let's pick up loose end #3 "en-za callback zone: GMT or SAST" (parked 2026-11-08). Context: ${CONTEXT}`,
+      mode: 'insert',
+    }),
+  ])
+  expect(JSON.stringify(store.get('/p'))).toBe(before)
+})
+
+test('/loose pull of a thread with no context, and of a tied one, says what is known', async ($, on) => {
+  // Arrange
+  const tied = { ...closed(2, NOW, 'naming'), note: 'went with loose' }
+  const { fills } = setup(on, { store: { '/p': { nextId: 3, threads: [open(1, 'cache'), tied] } } })
+  await start($)
+
+  // Act
+  await run($, 'pull', '1')
+  await run($, 'pull', '2')
+
+  // Assert
+  expect(fills).toEqual([
+    expect.objectContaining({ text: `Let's pick up loose end #1 "cache" (parked 2026-11-08).` }),
+    expect.objectContaining({
+      text: `Let's pick up loose end #2 "naming" (parked 2026-11-08). It was tied 2026-11-09: went with loose`,
+    }),
+  ])
+})
+
+test('/loose pull answers with the draft itself where the prompt box refuses it', async ($, on) => {
+  // Arrange
+  const { flags } = setup(on, { store: { '/p': { nextId: 2, threads: [open(1, 'cache')] } } })
+  await start($)
+  flags.canFill = false
+
+  // Act
+  const answer = await run($, 'pull', '1')
+
+  // Assert
+  expect(answer).toMatchObject({ text: `Let's pick up loose end #1 "cache" (parked 2026-11-08).` })
+})
+
+test('/loose pull answers usage, not found or unreadable, and fills nothing', async ($, on) => {
+  // Arrange
+  const { fills, store } = setup(on, { store: { '/p': { nextId: 2, threads: [open(1, 'a')] } } })
+  await start($)
+
+  // Act
+  const answers = [
+    await run($, 'pull'),
+    await run($, 'pull', 'x'),
+    await run($, 'pull', '1 2'),
+    await run($, 'pull', '9'),
+  ]
+  store.set('/p', 'garbage')
+  const unreadable = await run($, 'pull', '1')
+
+  // Assert
+  expect(answers).toEqual([
+    expect.objectContaining({ text: 'Usage: /loose pull <id>' }),
+    expect.objectContaining({ text: 'Usage: /loose pull <id>' }),
+    expect.objectContaining({ text: 'Usage: /loose pull <id>' }),
+    expect.objectContaining({ text: 'No thread #9.' }),
+  ])
+  expect(unreadable).toMatchObject({ text: UNREADABLE_READ })
+  expect(fills).toEqual([])
+})
+
+test('/loose answers usage for an unknown verb, lists for list, and takes any case', async ($, on) => {
+  // Arrange
+  setup(on, { store: { '/p': { nextId: 2, threads: [open(1, 'a')] } } })
+  await start($)
+  const usage = 'Usage: /loose [park <text> | pull <id> | tie <id> [note] | drop <id> | list]'
+
+  // Act
+  const unknown = await run($, 'grab', '1')
+  const listed = await run($, 'list')
+  const listedWithArgs = await run($, 'list', 'x')
+  const upper = await run($, 'TIE', '1')
+
+  // Assert
+  expect(unknown).toMatchObject({ text: usage })
+  expect(listed).toMatchObject({ text: '— open —\n#1 · 1d · a' })
+  expect(listedWithArgs).toMatchObject({ text: usage })
+  expect(upper).toMatchObject({ text: 'Tied #1 a' })
+})
+
+test('/loose park of text past 60 chars keeps the whole text as the context', async ($, on) => {
+  // Arrange
+  const text = 'decide whether the German callback zone label reads CET or MEZ in the form'
+  const { store } = setup(on)
+  await start($)
+
+  // Act
+  await run($, 'park', text)
+  await run($, 'park', 'short one')
+
+  // Assert
+  expect(stored(store).threads).toEqual([
+    { id: 1, text: text.slice(0, MAX_LABEL), context: text, origin: 'user', openedAt: iso(NOW) },
+    { id: 2, text: 'short one', origin: 'user', openedAt: iso(NOW) },
+  ])
+})
+
+test('pressing pull in the pane fills the prompt with the picked thread and toasts', async ($, on) => {
+  // Arrange
+  const { fills, toasts } = setup(on, {
+    store: { '/p': { nextId: 3, threads: [open(1, 'a', NOW - 2 * DAY), open(2, 'b')] } },
+  })
+  await start($)
+  const ui = await mountPane($, 'terminal', { isFocused: true })
+
+  // Act
+  await ui.press({ key: 'thread-2' })
+  await ui.press({ key: 'pull' })
+
+  // Assert
+  expect(fills).toEqual([
+    expect.objectContaining({ text: `Let's pick up loose end #2 "b" (parked 2026-11-08).` }),
+  ])
+  expect(toasts).toEqual(['Pulled #2 into the prompt.'])
+  expect(await rowIds(ui)).toEqual([1, 2])
+  await ui.unmount()
 })

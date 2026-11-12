@@ -1,13 +1,7 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
-import {
-  dropCommand,
-  parkCommand,
-  registerCommands,
-  threadsCommand,
-  tieCommand,
-} from './commands'
+import { looseCommand, registerCommands } from './commands'
 import { PANE_ID, drawPane, noteClose, openPane } from './pane'
 import { withRule } from './rule'
 import { REFRESH_MS, describeError, logDebug, safeRefresh, sweep } from './state'
@@ -104,15 +98,14 @@ export const register: Register = on => {
   on('tool.call', { tool: 'mcp__loose-ends__close' }, ($, e) => close($, e))
   on('tool.call', { tool: 'mcp__loose-ends__list' }, $ => list($))
 
-  // Each command hook answers its own command (it never reads `next`) and
-  // never throws: a failure is a one-line answer.
-  on('command.run', { command: 'park' }, ($, e) => parkCommand($, e.args))
-  // /threads opens the pane; where no surface draws it, the list as text.
-  on('command.run', { command: 'threads' }, async $ =>
-    (await openPane($, true)) ? { text: 'Opened the loose ends pane.' } : threadsCommand($),
+  // The command hook answers /loose itself (it never reads `next`) and never
+  // throws: a failure is a one-line answer. Bare /loose opens the pane; where
+  // no surface draws it, the list as text.
+  on('command.run', { command: 'loose' }, async ($, e) =>
+    e.args.trim() === '' && (await openPane($, true))
+      ? { text: 'Opened the loose ends pane.' }
+      : looseCommand($, e.args),
   )
-  on('command.run', { command: 'tie' }, ($, e) => tieCommand($, e.args))
-  on('command.run', { command: 'drop' }, ($, e) => dropCommand($, e.args))
 
   // The rule goes last, after every section beneath, which pass unchanged;
   // it is left out while the tools it names are not registered.

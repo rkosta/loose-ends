@@ -1,6 +1,8 @@
 export type Thread = {
   readonly id: number
   readonly text: string
+  // Where the thread came from and what hinges on it, for `/loose pull`.
+  readonly context?: string
   readonly origin: 'claude' | 'user'
   readonly openedAt: string
   readonly closedAt?: string
