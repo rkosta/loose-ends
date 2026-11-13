@@ -11,7 +11,7 @@ Load the `plugin-authoring` skill first. It starts hot reload and lays this buil
 ## Checks
 
 - Type-check: `npx --yes -p typescript@5 tsc --noEmit -p .`. There is no `package.json`. Keep `--noEmit`: without the engine-laid types the repo's `tsconfig.json` has no `noEmit`, and `tsc` writes `.js` into `hooks/`.
-- `claude plugin validate .` warns four times about gating hooks without `.catch` (three tool hooks, `ui.close`). Expected: handlers catch internally, and the typescript-patterns-enforcer rejects `.catch(`. Use `try`/`catch`.
+- `claude plugin validate .` warns five times about gating hooks without `.catch` (three tool hooks, `command.run` for `/loose`, `ui.close`). Expected: handlers catch internally, and the typescript-patterns-enforcer rejects `.catch(`. Use `try`/`catch`.
 - `claude plugin test .`: AAA style, a test-owned fake store over a `Map` (`mock.store` has no read-back), `mock.clock` for time.
 
 ## Conventions
@@ -21,7 +21,8 @@ Load the `plugin-authoring` skill first. It starts hot reload and lays this buil
 - Every store mutation goes through the write helper in `state.ts`: it queues per key, re-reads, refuses unreadable values, trims, writes, then updates the atom.
 - Every caught failure logs `loose-ends: <op> failed: <message>` to debug, then answers as before.
 - The system-prompt rule in `rule.ts` is fixed text, kept byte-identical to its test. State stays out of the prompt so the prompt cache holds.
-- Stored value is `{ v: 1, nextId, threads }`. Any shape change, an added field included, bumps `v`. A value this build can't recognise is never overwritten or deleted.
+- Stored value is `{ v: 2, nextId, threads }`; a thread may carry `context` (v2), and v1 is still read. Any shape change, an added field included, bumps `v` and the atom's shape tag in `threads.ts`. A value this build can't recognise is never overwritten or deleted.
+- `$` goes only to named functions at the call site: a lookup table of handlers (`table[kind]($)`) fails the engine's source scan.
 - Parking is main-thread only (enforced through `e.agentId`); only the user drops.
 
 ## Git

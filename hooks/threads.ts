@@ -21,13 +21,19 @@ export type Mutation<R> = { project?: Project; result: R }
  * Change it when a thread's fields change: it declines what an earlier
  * version stored, which outlives a reload.
  */
-export const THREADS_ATOM_SHAPE = 'threads-1'
+export const THREADS_ATOM_SHAPE = 'threads-2'
 
 /**
  * The longest label kept. The rule asks for about 50 characters; this leaves
  * slack, and keeps a pane row on one line at a docked pane's usual width.
  */
 export const MAX_LABEL = 60
+
+/**
+ * The longest context kept: the rule asks for 1–3 sentences, which this
+ * leaves room for, while a pulled draft stays a paragraph, not a page.
+ */
+export const MAX_CONTEXT = 500
 export const KEEP_CLOSED = 50
 export const SWEEP_DAYS = 90
 
@@ -36,15 +42,19 @@ const DAY = 86_400_000
 export const emptyProject = (): Project => ({ nextId: 1, threads: [] })
 
 /**
- * The version of the stored value this code writes and reads. A value with
- * no `v` is read as this version (what came before versioning had its shape);
- * any other `v` is a later version's, which this code leaves alone.
+ * The version of the stored value this code writes. It reads this one and
+ * the earlier ones (`READS_VERSIONS`); a value with no `v` is read as v1
+ * (what came before versioning had its shape); any other `v` is a later
+ * version's, which this code leaves alone.
  *
  * Any change to the stored shape bumps it, an added field included: an older
  * build reads a newer `v` as unreadable, so it never sweeps or overwrites a
- * value it would otherwise rewrite without the field.
+ * value it would otherwise rewrite without the field. v2 added `context`.
  */
-export const STORE_VERSION = 1
+export const STORE_VERSION = 2
+
+/** The stored versions this code reads: v1 is v2 with no context anywhere. */
+const READS_VERSIONS: readonly unknown[] = [undefined, 1, STORE_VERSION]
 
 /** What the store holds per project: the project, tagged with its version. */
 export type StoredProject = Project & { v: typeof STORE_VERSION }
@@ -74,11 +84,12 @@ const parseThread = (value: unknown): Thread | null => {
     return null
   }
 
-  const { id, text, origin, openedAt, closedAt, note } = value
+  const { id, text, context, origin, openedAt, closedAt, note } = value
   // Only closing writes a note, so a note on an open thread is broken.
   const isValid =
     isPositiveInteger(id) &&
     typeof text === 'string' &&
+    (context === undefined || typeof context === 'string') &&
     (origin === 'claude' || origin === 'user') &&
     isTimestamp(openedAt) &&
     (closedAt === undefined || isTimestamp(closedAt)) &&
@@ -91,6 +102,7 @@ const parseThread = (value: unknown): Thread | null => {
   return {
     id,
     text,
+    ...(typeof context === 'string' ? { context } : {}),
     origin,
     openedAt,
     ...(typeof closedAt === 'string' ? { closedAt } : {}),
@@ -99,8 +111,8 @@ const parseThread = (value: unknown): Thread | null => {
 }
 
 /**
- * Reads a stored value. A missing key is an empty project; a v1 value (or
- * one with no `v`) whose counter and every thread are valid, with no id used
+ * Reads a stored value. A missing key is an empty project; a v1 or v2 value
+ * (or one with no `v`) whose counter and every thread are valid, with no id used
  * twice, is that project; anything else is unrecognised, whole: no thread is
  * dropped to make it fit.
  */
@@ -113,7 +125,7 @@ export const parseProject = (raw: unknown): ParsedProject => {
     return UNRECOGNISED
   }
 
-  const isKnownVersion = raw.v === undefined || raw.v === STORE_VERSION
+  const isKnownVersion = READS_VERSIONS.includes(raw.v)
 
   if (!isKnownVersion || !isPositiveInteger(raw.nextId)) {
     return UNRECOGNISED
@@ -196,6 +208,10 @@ export const oneLine = (text: string): string =>
 export const normaliseLabel = (text: string): string =>
   oneLine(text).slice(0, MAX_LABEL)
 
+/** A context as stored: on one line, at most `MAX_CONTEXT` chars. */
+export const normaliseContext = (text: string): string =>
+  oneLine(text).slice(0, MAX_CONTEXT)
+
 /** What two labels are compared by when deduping. */
 export const labelKey = (text: string): string =>
   normaliseLabel(text).toLowerCase()
@@ -212,6 +228,9 @@ export const openThreads = (threads: readonly Thread[]): Thread[] =>
         Date.parse(a.openedAt) - Date.parse(b.openedAt) || a.id - b.id,
     )
 
+/** One point to park: its label, and where it came from when known. */
+export type ParkItem = { readonly label: string; readonly context?: string }
+
 /** One parked label: the id it got, and whether it was open already. */
 export type Parked = { id: number; isExisting: boolean }
 
@@ -221,13 +240,15 @@ export type ParkOutcome =
   | { kind: 'full' }
 
 /**
- * Parks `labels` (already validated as non-blank). A label already open
- * (case-insensitive, trimmed, the batch included) answers that thread's id.
- * With a `cap`, a park that would leave more open than it is refused whole.
+ * Parks `items` (labels already validated as non-blank). A label already
+ * open (case-insensitive, trimmed, the batch included) answers that thread's
+ * id and leaves the thread, context included, as it was. A blank context is
+ * left out. With a `cap`, a park that would leave more open than it is
+ * refused whole.
  */
 export const parkLabels = (
   project: Project,
-  labels: readonly string[],
+  items: readonly ParkItem[],
   origin: Thread['origin'],
   nowIso: string,
   cap?: number,
@@ -237,8 +258,9 @@ export const parkLabels = (
     parked: [] as Parked[],
     next: nextId(project),
   }
-  const done = labels.reduce((acc, raw) => {
-    const text = normaliseLabel(raw)
+  const done = items.reduce((acc, item) => {
+    const text = normaliseLabel(item.label)
+    const context = normaliseContext(item.context ?? '')
     const found = acc.threads.find(
       one => isOpen(one) && labelKey(one.text) === labelKey(text),
     )
@@ -252,7 +274,13 @@ export const parkLabels = (
         : { ...acc, parked: [...acc.parked, { id: found.id, isExisting: true }] }
     }
 
-    const thread: Thread = { id: acc.next, text, origin, openedAt: nowIso }
+    const thread: Thread = {
+      id: acc.next,
+      text,
+      ...(context === '' ? {} : { context }),
+      origin,
+      openedAt: nowIso,
+    }
 
     return {
       threads: [...acc.threads, thread],
@@ -329,6 +357,25 @@ export const formatList = (threads: readonly Thread[]): string => {
 }
 
 export const THREADS_SHOWS_CLOSED = 5
+
+/** The day part of a stored timestamp, `2026-11-10` (UTC). */
+const day = (at: string): string => at.slice(0, 10)
+
+/**
+ * What `/loose pull` puts in the prompt box: the thread as a sentence the
+ * model can pick up cold, its context after it, and for a closed thread when
+ * it was tied and with what note.
+ */
+export const formatPull = (thread: Thread): string => {
+  const head = `Let's pick up loose end #${thread.id} "${thread.text}" (parked ${day(thread.openedAt)}).`
+  const context = thread.context === undefined ? '' : ` Context: ${thread.context}`
+  const tied =
+    thread.closedAt === undefined
+      ? ''
+      : ` It was tied ${day(thread.closedAt)}${thread.note === undefined ? '.' : `: ${thread.note}`}`
+
+  return `${head}${context}${tied}`
+}
 
 /**
  * A thread id as typed after a command (`3` or `#3`): a positive integer, or

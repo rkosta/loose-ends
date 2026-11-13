@@ -17,7 +17,7 @@ import {
   formatPark,
   parkLabels,
 } from './threads'
-import type { ParkOutcome } from './threads'
+import type { ParkItem, ParkOutcome } from './threads'
 
 // Helpers handed `$` are function declarations: past an import the engine
 // follows `$` only into those.
@@ -28,7 +28,7 @@ export type ToolAnswer = { result: string } | { deny: string }
 /** A tool call's arguments as they arrive, spread on `e` beside `agentId`. */
 export type ToolArgs = { readonly [argument: string]: unknown }
 
-const FULL = `${MAX_OPEN} loose ends open — ask the user to /tie or /drop some first`
+const FULL = `${MAX_OPEN} loose ends open — ask the user to /loose tie or /loose drop some first`
 
 /**
  * Registers park, close and list, always listed (never behind ToolSearch).
@@ -40,11 +40,19 @@ export async function registerTools($: EngineInterface): Promise<void> {
     $.tool.register({
       name: 'park',
       description:
-        'Park discussion points the user has not answered yet, each as a short noun-phrase label of about 50 characters (cut at 60). Returns their thread ids.',
+        'Park discussion points the user has not answered yet. Each item has a label, a short noun phrase of about 50 characters (cut at 60), and a context of 1–3 sentences: where the point came up, the options on the table and what hinges on it, clear without this conversation (cut at 500). Returns their thread ids.',
       inputSchema: {
         type: 'object',
         properties: {
-          items: { type: 'array', items: { type: 'string' }, minItems: 1 },
+          items: {
+            type: 'array',
+            items: {
+              type: 'object',
+              properties: { label: { type: 'string' }, context: { type: 'string' } },
+              required: ['label'],
+            },
+            minItems: 1,
+          },
         },
         required: ['items'],
       },
@@ -82,6 +90,35 @@ export async function registerTools($: EngineInterface): Promise<void> {
 /** The tools `registerTools` registers, in its order. */
 const TOOL_NAMES = ['park', 'close', 'list'] as const
 
+const isRecord = (value: unknown): value is Readonly<Record<string, unknown>> =>
+  typeof value === 'object' && value !== null && !Array.isArray(value)
+
+const isFilled = (value: unknown): value is string =>
+  typeof value === 'string' && value.trim() !== ''
+
+/**
+ * One park item as the model sent it: `{ label, context? }` as the schema
+ * asks, or a bare label string as earlier schemas did; undefined when the
+ * label is blank or anything is the wrong type.
+ */
+const toParkItem = (item: unknown): ParkItem | undefined => {
+  if (isFilled(item)) {
+    return { label: item }
+  }
+
+  if (!isRecord(item) || !isFilled(item.label)) {
+    return undefined
+  }
+
+  const { label, context } = item
+
+  if (context !== undefined && typeof context !== 'string') {
+    return undefined
+  }
+
+  return context === undefined ? { label } : { label, context }
+}
+
 const parkAnswer = (outcome: ParkOutcome): ToolAnswer =>
   outcome.kind === 'full'
     ? { deny: FULL }
@@ -101,17 +138,16 @@ export async function park(
     return { deny: 'park needs at least one item' }
   }
 
-  const labels = items.filter(
-    (item): item is string => typeof item === 'string' && item.trim() !== '',
-  )
+  const parsed = items.map(toParkItem)
+  const parkItems = parsed.filter((item): item is ParkItem => item !== undefined)
 
-  if (labels.length !== items.length) {
-    return { deny: 'park items must be non-blank strings' }
+  if (parkItems.length !== items.length) {
+    return { deny: 'park items need a non-blank label and a string context' }
   }
 
   try {
     const written = await writeThreads($, (project, nowIso) =>
-      parkLabels(project, labels, 'claude', nowIso, MAX_OPEN),
+      parkLabels(project, parkItems, 'claude', nowIso, MAX_OPEN),
     )
 
     return written.kind === 'unreadable'

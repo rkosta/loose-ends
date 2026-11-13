@@ -10,10 +10,13 @@ import {
   writeThreads,
 } from './state'
 import {
+  MAX_LABEL,
   closeThread,
   dropThread,
+  formatPull,
   formatThreads,
   normaliseLabel,
+  oneLine,
   parkLabels,
   parseThreadId,
 } from './threads'
@@ -26,33 +29,23 @@ import type { Thread } from '../types'
 /** What a command hook answers: one transcript row, which the model reads too. */
 export type CommandAnswer = { text: string }
 
-const PARK_USAGE = 'Usage: /park <text>'
-const TIE_USAGE = 'Usage: /tie <id> [note]'
-const DROP_USAGE = 'Usage: /drop <id>'
+/** The one command; every action is a verb after it. */
+export const COMMAND = 'loose'
 
-/** Registers /park, /threads, /tie and /drop. */
+const VERBS_HINT = '[park <text> | pull <id> | tie <id> [note] | drop <id> | list]'
+const LOOSE_USAGE = `Usage: /loose ${VERBS_HINT}`
+const PARK_USAGE = 'Usage: /loose park <text>'
+const PULL_USAGE = 'Usage: /loose pull <id>'
+const TIE_USAGE = 'Usage: /loose tie <id> [note]'
+const DROP_USAGE = 'Usage: /loose drop <id>'
+
+/** Registers /loose. */
 export async function registerCommands($: EngineInterface): Promise<void> {
-  await Promise.all([
-    $.command.register({
-      name: 'park',
-      description: 'Park a loose end for this project',
-      argumentHint: '<text>',
-    }),
-    $.command.register({
-      name: 'threads',
-      description: "List this project's loose ends, open and recently tied",
-    }),
-    $.command.register({
-      name: 'tie',
-      description: 'Tie off a loose end, with an optional note',
-      argumentHint: '<id> [note]',
-    }),
-    $.command.register({
-      name: 'drop',
-      description: 'Remove a loose end parked by mistake',
-      argumentHint: '<id>',
-    }),
-  ])
+  await $.command.register({
+    name: COMMAND,
+    description: "This project's loose ends: park, pull into the prompt, tie, drop or list",
+    argumentHint: VERBS_HINT,
+  })
 }
 
 /** Splits `"#3 a note"` into its id token and the rest. */
@@ -65,6 +58,33 @@ const splitId = (args: string): { token: string; rest: string } => {
   return match === null
     ? { token: '', rest: '' }
     : { token: match[1] ?? '', rest: match[2] ?? '' }
+}
+
+/**
+ * Runs `/loose <verb> …`. Bare `/loose` and `list` print the list; the pane
+ * open for bare `/loose` is the caller's, which can reach the pane.
+ */
+export async function looseCommand(
+  $: EngineInterface,
+  args: string,
+): Promise<CommandAnswer> {
+  const { token, rest } = splitId(args)
+
+  switch (token.toLowerCase()) {
+    case '':
+    case 'list':
+      return rest === '' ? threadsCommand($) : { text: LOOSE_USAGE }
+    case 'park':
+      return parkCommand($, rest)
+    case 'pull':
+      return pullCommand($, rest)
+    case 'tie':
+      return tieCommand($, rest)
+    case 'drop':
+      return dropCommand($, rest)
+    default:
+      return { text: LOOSE_USAGE }
+  }
 }
 
 const findThread = (
@@ -80,9 +100,14 @@ export async function parkCommand(
     return { text: PARK_USAGE }
   }
 
+  // A label is cut at MAX_LABEL; what the person typed past it is kept
+  // whole as the context, so nothing they wrote is lost.
+  const isLong = oneLine(args).length > MAX_LABEL
+  const item = isLong ? { label: args, context: args } : { label: args }
+
   try {
     const written = await writeThreads($, (project, nowIso) =>
-      parkLabels(project, [args], 'user', nowIso),
+      parkLabels(project, [item], 'user', nowIso),
     )
 
     if (written.kind === 'unreadable') {
@@ -95,9 +120,9 @@ export async function parkCommand(
     if (parked === undefined) {
       // Not reached today: /park passes no cap and one non-blank label always
       // parks or matches one. The types allow `full` and an empty list.
-      logDebug($, 'loose-ends: /park unexpected outcome')
+      logDebug($, 'loose-ends: /loose park unexpected outcome')
 
-      return { text: 'loose-ends: /park failed' }
+      return { text: 'loose-ends: /loose park failed' }
     }
 
     if (parked.isExisting) {
@@ -106,9 +131,9 @@ export async function parkCommand(
 
     return { text: `Parked #${parked.id}: ${normaliseLabel(args)}` }
   } catch (error) {
-    logDebug($, `loose-ends: /park failed: ${describeError(error)}`)
+    logDebug($, `loose-ends: /loose park failed: ${describeError(error)}`)
 
-    return { text: 'loose-ends: /park failed' }
+    return { text: 'loose-ends: /loose park failed' }
   }
 }
 
@@ -124,9 +149,49 @@ export async function threadsCommand(
 
     return { text: formatThreads(parsed.project.threads, await $.clock.now()) }
   } catch (error) {
-    logDebug($, `loose-ends: /threads failed: ${describeError(error)}`)
+    logDebug($, `loose-ends: /loose list failed: ${describeError(error)}`)
 
-    return { text: 'loose-ends: /threads failed' }
+    return { text: 'loose-ends: /loose list failed' }
+  }
+}
+
+/**
+ * Puts thread `id` (open or closed) into the prompt box as a draft the
+ * person edits or sends, at the cursor so what they typed stays. Where no
+ * box takes it, the draft is the answer instead, so it still reaches them.
+ */
+export async function pullCommand(
+  $: EngineInterface,
+  args: string,
+): Promise<CommandAnswer> {
+  const { token, rest } = splitId(args)
+  const id = rest === '' ? parseThreadId(token) : undefined
+
+  if (id === undefined) {
+    return { text: PULL_USAGE }
+  }
+
+  try {
+    const parsed = await readProject($, await projectKey($))
+
+    if (parsed.kind === 'unrecognised') {
+      return { text: UNREADABLE_READ }
+    }
+
+    const thread = findThread(parsed.project, id)
+
+    if (thread === undefined) {
+      return { text: `No thread #${id}.` }
+    }
+
+    const draft = formatPull(thread)
+    const filled = await $.prompt.fill({ text: draft, mode: 'insert' })
+
+    return filled.isFilled ? { text: `Pulled #${id} into the prompt.` } : { text: draft }
+  } catch (error) {
+    logDebug($, `loose-ends: /loose pull failed: ${describeError(error)}`)
+
+    return { text: 'loose-ends: /loose pull failed' }
   }
 }
 
@@ -162,9 +227,9 @@ export async function tieCommand(
 
     return { text: thread.note === undefined ? tied : `${tied} → ${thread.note}` }
   } catch (error) {
-    logDebug($, `loose-ends: /tie failed: ${describeError(error)}`)
+    logDebug($, `loose-ends: /loose tie failed: ${describeError(error)}`)
 
-    return { text: 'loose-ends: /tie failed' }
+    return { text: 'loose-ends: /loose tie failed' }
   }
 }
 
@@ -195,8 +260,8 @@ export async function dropCommand(
       ? { text: `No thread #${id}.` }
       : { text: `Dropped #${dropped.id} ${dropped.text}` }
   } catch (error) {
-    logDebug($, `loose-ends: /drop failed: ${describeError(error)}`)
+    logDebug($, `loose-ends: /loose drop failed: ${describeError(error)}`)
 
-    return { text: 'loose-ends: /drop failed' }
+    return { text: 'loose-ends: /loose drop failed' }
   }
 }
