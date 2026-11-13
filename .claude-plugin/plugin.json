@@ -1,6 +1,6 @@
 {
   "name": "loose-ends",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Keeps a per-project list of open discussion threads that Claude parks and closes, shown in a side pane and the status line.",
   "types": "./types/index.d.ts"
 }
